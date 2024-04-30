@@ -1,0 +1,703 @@
+#!/usr/bin/env python2.7
+
+# Copyright (c) 2010 Marcin Krol <mrkafk@gmail.com>.  All rights reserved.
+
+# Permission to use, copy, modify, and distribute this software and its
+# documentation for any purpose and without fee is hereby granted,
+# provided that the above copyright notice appear in all copies and that
+# both that copyright notice and this permission notice appear in
+# supporting documentation.
+
+# MARCIN KROL DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
+# INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS,
+# IN NO EVENT SHALL MARCIN KROL BE LIABLE FOR ANY SPECIAL, INDIRECT
+# OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+# LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+# NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION
+# WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+# This software is licensed under MIT License:
+# http://opensource.org/licenses/mit-license.php
+
+import os
+import sys
+import logging
+import ConfigParser
+import codecs
+import re
+import curses
+import string
+import signal
+import json
+import pickle
+
+cfg = None
+scr = None
+sess = None
+scriptpath = os.path.dirname(__file__)
+
+# v0.2
+
+# TODO
+# look for logins.conf in . and ~, otherwise error and exit
+# optional save page num and display page num on next run
+# auto add domain if . not present in hostname
+# Alt and Ctrl for
+# other ways of extending the list len: e.g. mod key like ~, `, F6
+# other programs:
+#     e.g. krdc, nxclient
+#     (like krdc), param expansion like $HOST $USER $FQDN
+#     possibly handlers for running external programs, scripts
+#     launch editor of remote file, using e.g. kate -u
+# scp support
+# sync support
+# ksshaskpass, ssh-add ?
+# mb as terminator plugin
+# name: conman?
+# conman as terminator plugin + standalone
+# plugin manager for terminator
+# incremental search: typing by domain
+#     display list on spec key like Esc or login on Alt+key
+#     highlight matches
+# cursor keys in list
+
+# DONE: remember last used login
+# DONE: global_parameters
+# DONE: parse 'sort' option
+# DONE: ssh parameters in config file
+# DONE: keys: Esc to quit
+# DONE: login groups
+# DONE: columns for domain names
+# DONE: paging
+# DONE: backspace/pgup for prev page, space/pgdn for next page
+# DONE: display key info on the bottom row
+
+
+def str2bool(s):
+    s = s.strip().lower()
+    if s == '1' or s == 'yes' or s == 'y' or s == 'true' or s == 't':
+        return True
+    return False
+
+def split_strip(s, sep, subelem_str=None):
+    """Split s using separator sep, strip each element of whitespace. Optionally return only list that contain subelem_str."""
+    if subelem_str:
+        return [x.strip() for x in s.split(sep) if subelem_str in x]
+    return [x.strip() for x in s.split(sep)]
+
+def signal_handler(sig, frame):
+    curses.nocbreak()
+    scr.keypad(False)
+    curses.echo()
+    curses.endwin()
+    print 'Ctrl-C pressed. Aborting.'
+    sys.exit(0)
+
+def read_keycode():
+    c = scr.getch()
+    err_exit('getch key code: %s\n' % c, 0, finish_curses=True)
+    
+def maybe_pretty(obj, indent=4):
+    try:
+        newobj = obj
+        if isinstance(obj, str):
+            newobj = json.loads(obj)
+        prettified = json.dumps(newobj, sort_keys=True, indent=indent)
+    except Exception as error:
+        prettified = obj
+    return prettified
+
+
+##########################################################
+
+
+# http://code.activestate.com/recipes/576693/
+# Backport of OrderedDict() class that runs on Python 2.4, 2.5, 2.6, 2.7 and pypy.
+# Passes Python2.7's test suite and incorporates all the latest updates.
+
+try:
+    from thread import get_ident as _get_ident
+except ImportError:
+    from dummy_thread import get_ident as _get_ident
+
+try:
+    from _abcoll import KeysView, ValuesView, ItemsView
+except ImportError:
+    pass
+
+
+class OrderedDict(dict):
+    'Dictionary that remembers insertion order'
+    # An inherited dict maps keys to values.
+    # The inherited dict provides __getitem__, __len__, __contains__, and get.
+    # The remaining methods are order-aware.
+    # Big-O running times for all methods are the same as for regular dictionaries.
+
+    # The internal self.__map dictionary maps keys to links in a doubly linked list.
+    # The circular doubly linked list starts and ends with a sentinel element.
+    # The sentinel element never gets deleted (this simplifies the algorithm).
+    # Each link is stored as a list of length three:  [PREV, NEXT, KEY].
+
+    def __init__(self, *args, **kwds):
+        '''Initialize an ordered dictionary.  Signature is the same as for
+        regular dictionaries, but keyword arguments are not recommended
+        because their insertion order is arbitrary.
+
+        '''
+        if len(args) > 1:
+            raise TypeError('expected at most 1 arguments, got %d' % len(args))
+        try:
+            self.__root
+        except AttributeError:
+            self.__root = root = []                     # sentinel node
+            root[:] = [root, root, None]
+            self.__map = {}
+        self.__update(*args, **kwds)
+
+    def __setitem__(self, key, value, dict_setitem=dict.__setitem__):
+        'od.__setitem__(i, y) <==> od[i]=y'
+        # Setting a new item creates a new link which goes at the end of the linked
+        # list, and the inherited dictionary is updated with the new key/value pair.
+        if key not in self:
+            root = self.__root
+            last = root[0]
+            last[1] = root[0] = self.__map[key] = [last, root, key]
+        dict_setitem(self, key, value)
+
+    def __delitem__(self, key, dict_delitem=dict.__delitem__):
+        'od.__delitem__(y) <==> del od[y]'
+        # Deleting an existing item uses self.__map to find the link which is
+        # then removed by updating the links in the predecessor and successor nodes.
+        dict_delitem(self, key)
+        link_prev, link_next, key = self.__map.pop(key)
+        link_prev[1] = link_next
+        link_next[0] = link_prev
+
+    def __iter__(self):
+        'od.__iter__() <==> iter(od)'
+        root = self.__root
+        curr = root[1]
+        while curr is not root:
+            yield curr[2]
+            curr = curr[1]
+
+    def __reversed__(self):
+        'od.__reversed__() <==> reversed(od)'
+        root = self.__root
+        curr = root[0]
+        while curr is not root:
+            yield curr[2]
+            curr = curr[0]
+
+    def clear(self):
+        'od.clear() -> None.  Remove all items from od.'
+        try:
+            for node in self.__map.itervalues():
+                del node[:]
+            root = self.__root
+            root[:] = [root, root, None]
+            self.__map.clear()
+        except AttributeError:
+            pass
+        dict.clear(self)
+
+    def popitem(self, last=True):
+        '''od.popitem() -> (k, v), return and remove a (key, value) pair.
+        Pairs are returned in LIFO order if last is true or FIFO order if false.
+
+        '''
+        if not self:
+            raise KeyError('dictionary is empty')
+        root = self.__root
+        if last:
+            link = root[0]
+            link_prev = link[0]
+            link_prev[1] = root
+            root[0] = link_prev
+        else:
+            link = root[1]
+            link_next = link[1]
+            root[1] = link_next
+            link_next[0] = root
+        key = link[2]
+        del self.__map[key]
+        value = dict.pop(self, key)
+        return key, value
+
+    # -- the following methods do not depend on the internal structure --
+
+    def keys(self):
+        'od.keys() -> list of keys in od'
+        return list(self)
+
+    def values(self):
+        'od.values() -> list of values in od'
+        return [self[key] for key in self]
+
+    def items(self):
+        'od.items() -> list of (key, value) pairs in od'
+        return [(key, self[key]) for key in self]
+
+    def iterkeys(self):
+        'od.iterkeys() -> an iterator over the keys in od'
+        return iter(self)
+
+    def itervalues(self):
+        'od.itervalues -> an iterator over the values in od'
+        for k in self:
+            yield self[k]
+
+    def iteritems(self):
+        'od.iteritems -> an iterator over the (key, value) items in od'
+        for k in self:
+            yield (k, self[k])
+
+    def update(*args, **kwds):
+        '''od.update(E, **F) -> None.  Update od from dict/iterable E and F.
+
+        If E is a dict instance, does:           for k in E: od[k] = E[k]
+        If E has a .keys() method, does:         for k in E.keys(): od[k] = E[k]
+        Or if E is an iterable of items, does:   for k, v in E: od[k] = v
+        In either case, this is followed by:     for k, v in F.items(): od[k] = v
+
+        '''
+        if len(args) > 2:
+            raise TypeError('update() takes at most 2 positional '
+                            'arguments (%d given)' % (len(args),))
+        elif not args:
+            raise TypeError('update() takes at least 1 argument (0 given)')
+        self = args[0]
+        # Make progressively weaker assumptions about "other"
+        other = ()
+        if len(args) == 2:
+            other = args[1]
+        if isinstance(other, dict):
+            for key in other:
+                self[key] = other[key]
+        elif hasattr(other, 'keys'):
+            for key in other.keys():
+                self[key] = other[key]
+        else:
+            for key, value in other:
+                self[key] = value
+        for key, value in kwds.items():
+            self[key] = value
+
+    __update = update  # let subclasses override update without breaking __init__
+
+    __marker = object()
+
+    def pop(self, key, default=__marker):
+        '''od.pop(k[,d]) -> v, remove specified key and return the corresponding value.
+        If key is not found, d is returned if given, otherwise KeyError is raised.
+
+        '''
+        if key in self:
+            result = self[key]
+            del self[key]
+            return result
+        if default is self.__marker:
+            raise KeyError(key)
+        return default
+
+    def setdefault(self, key, default=None):
+        'od.setdefault(k[,d]) -> od.get(k,d), also set od[k]=d if k not in od'
+        if key in self:
+            return self[key]
+        self[key] = default
+        return default
+
+    def __repr__(self, _repr_running={}):
+        'od.__repr__() <==> repr(od)'
+        call_key = id(self), _get_ident()
+        if call_key in _repr_running:
+            return '...'
+        _repr_running[call_key] = 1
+        try:
+            if not self:
+                return '%s()' % (self.__class__.__name__,)
+            return '%s(%r)' % (self.__class__.__name__, self.items())
+        finally:
+            del _repr_running[call_key]
+
+    def __reduce__(self):
+        'Return state information for pickling'
+        items = [[k, self[k]] for k in self]
+        inst_dict = vars(self).copy()
+        for k in vars(OrderedDict()):
+            inst_dict.pop(k, None)
+        if inst_dict:
+            return (self.__class__, (items,), inst_dict)
+        return self.__class__, (items,)
+
+    def copy(self):
+        'od.copy() -> a shallow copy of od'
+        return self.__class__(self)
+
+    @classmethod
+    def fromkeys(cls, iterable, value=None):
+        '''OD.fromkeys(S[, v]) -> New ordered dictionary with keys from S
+        and values equal to v (which defaults to None).
+
+        '''
+        d = cls()
+        for key in iterable:
+            d[key] = value
+        return d
+
+    def __eq__(self, other):
+        '''od.__eq__(y) <==> od==y.  Comparison to another OD is order-sensitive
+        while comparison to a regular mapping is order-insensitive.
+
+        '''
+        if isinstance(other, OrderedDict):
+            return len(self)==len(other) and self.items() == other.items()
+        return dict.__eq__(self, other)
+
+    def __ne__(self, other):
+        return not self == other
+
+    # -- the following methods are only used in Python 2.7 --
+
+    def viewkeys(self):
+        "od.viewkeys() -> a set-like object providing a view on od's keys"
+        return KeysView(self)
+
+    def viewvalues(self):
+        "od.viewvalues() -> an object providing a view on od's values"
+        return ValuesView(self)
+
+    def viewitems(self):
+        "od.viewitems() -> a set-like object providing a view on od's items"
+        return ItemsView(self)
+
+##########################################################
+
+def err_exit(msg, exitcode, finish_curses=False):
+    if finish_curses:
+        scr.keypad(False)
+        curses.echo()
+        curses.endwin()
+    sys.stderr.write(msg)
+    sys.stderr.flush()
+    sys.exit(exitcode)
+
+
+class MiniConfig(object):
+
+    def __init__(self, fname, search_dirs=['/etc', '~', scriptpath]):
+        self.confpath = fname
+        self.optlist = []
+        self.optdict = {}
+        self.options = {}
+        self.confpath = self._find_confpath(search_dirs)
+        self.parse()
+
+    def _find_confpath(self, search_dirs):
+        for p in search_dirs:
+            if p.startswith('~'):
+                p = os.path.expanduser(p)
+            confpath = os.sep.join([p, 'logins.conf'])
+            if os.path.isfile(confpath):
+                try:
+                    conf = open(confpath)
+                    conf.close()
+                    return confpath
+                except IOError:
+                    err_exit('Error: could not open config file %s. Aborting.' % confpath, 2)
+        err_exit('Error: could not find config file (logins.conf). Aborting.', 3)
+
+    def parse(self):
+        lines = open(self.confpath).readlines()
+        content = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if line[0] == '#':
+                continue
+            key = val = None
+            try:
+                key, val = [x.strip() for x in line.split('=')]
+            except ValueError:
+                pass
+            self.optdict.setdefault(key, []).append(val)
+            self.optlist.append((key,val))
+        for key in self.optdict:
+            v = self.optdict[key]
+            if v == '':
+                self.options[key] = ''
+                continue
+            if isinstance(v, basestring) and v.lower() == 'none':
+                self.options[key] = None
+                continue
+            if isinstance(v, list) and len(v) == 1:
+                self.options[key] = v[0]
+                continue
+            self.options[key] = v
+
+
+class LoginDatum(object):
+
+    def __init__(self, charcode, keystr, name, login, params, elem_type='login'):
+        self.charcode = charcode
+        self.keystr = keystr
+        self.name = name
+        self.login = login
+        self.params = params
+        self.elem_type = elem_type
+
+
+class LoginSelector(object):
+
+    def __init__(self):
+        self.scr = None
+        self.height = 0
+        self.width = 0
+        self.maxcols = 0
+        self.maxcolwidth = 0
+        self.logins = self.get_logins(cfg)
+        self.login = None
+        self.user_select_login(self.logins)
+
+    def select_opt_elems(self, lst, elem_names=[]):
+        elems = [x for x in lst if x[0] in elem_names]
+        return elems        
+
+    def get_logins(self, cfgo):    
+        logins = self.select_opt_elems(cfgo.optlist, ['login', 'group'])
+        groups = OrderedDict()
+        group = None
+        groupnames = []
+        for nvtup in logins:
+            optname, optval = nvtup
+            if optname == 'group':
+                group = optval
+                groupnames.append(group)
+                continue
+            if not group:
+                continue
+            if group not in groups:
+                groups[group] = []
+            groups[group].append(optval)
+        for g in groups:
+            logins = [self.parse_login_value(x) for x in groups[g]]
+            groups[g] = logins
+            #print g, maybe_pretty(groups[g])
+        self.logins = groups
+        return self.logins
+
+    def make_keys(self):
+        s = string.digits + string.ascii_lowercase + string.ascii_uppercase + string.punctuation
+        return list(s)
+
+    def parse_login_value(self, val):
+        tup = [x.strip() for x in val.split(',')]
+        name = login = tup[0]
+        params = None
+        try:
+            name, login, params = tup
+            return name, login, params
+        except ValueError:
+            pass
+        try:
+            name, login = tup
+            return name, login, None
+        except ValueError:
+            pass
+        return name, login, params
+
+    def get_login_data(self, login_values, maxcolwidth):
+        ldata = []
+        bykey = {}
+        keys = self.make_keys()
+        keys.reverse()
+        for group in login_values:
+            logins = login_values[group]
+            ldata.append(LoginDatum(0, '', group, '', '', elem_type='group'))
+            for ltup in logins:
+                try:
+                    key = keys.pop()
+                except IndexError:
+                    key = ' '
+                keystr = str(key)
+                keystr = keystr[:maxcolwidth]
+                name, login, params = ltup
+                alogin = LoginDatum(key, keystr, name, login, params)
+                ldata.append(alogin)
+                bykey[key] = alogin
+        return ldata, bykey
+
+    def get_max_uname_len(self, ldata):
+        names = [x.name for x in ldata if x.elem_type == 'login']
+        usernames = [x.split('@')[0] for x in names]
+        username_lengths = [len(x) for x in usernames]
+        return max(username_lengths)
+
+    def disp_instr(self, height, width):
+        msg = "enter - last login, space/pgdn - next pg, backspace/pgup - prev page, esc/ctrl-c - quit"[:width-1]
+        self.scr.addstr(height-1, 0, string.center(msg, width-1))
+
+    def draw_columns(self, ldata, scr, height, width, maxcolwidth, maxcols, login_idx=0):
+        lenldata = len(ldata)
+        pagelen = 0
+        attrs = 0
+        if str2bool(cfg.options['color']):
+            key_attrs = curses.color_pair(1)
+            group_attrs = curses.color_pair(2)
+        max_username_len = (maxcolwidth - 3)/3
+        username_len = min(self.get_max_uname_len(ldata), max_username_len)
+        ses_login = sess.session['last_login']
+        for col in range(maxcols):
+            for row in range(height-1):
+                elem = ldata[login_idx]
+                if elem.elem_type == 'group':
+                    self.scr.addstr(row, col*maxcolwidth + 1, elem.name, group_attrs)
+                    login_idx += 1
+                    if login_idx == lenldata:
+                        self.disp_instr(height, width)
+                        return 0
+                    continue
+                self.scr.addstr(row, col*maxcolwidth, '   ')
+                self.scr.addstr(row, col*maxcolwidth + 1, elem.keystr, key_attrs)
+                logstr = '%-.*s' % (maxcolwidth-3, ldata[login_idx].name)
+                try:
+                    color_login_attrs = curses.color_pair(3)
+                    if elem.name == ses_login['name'] and elem.login == ses_login['login'] and elem.params == ses_login['params']:
+                        color_login_attrs = curses.color_pair(2) | curses.A_STANDOUT
+                    username, domain = split_strip(logstr, '@')
+                    self.scr.addstr(row, col*maxcolwidth + 3, username, color_login_attrs)
+                    dom_pos = col*maxcolwidth + 3 + max_username_len
+                    self.scr.addstr(row, dom_pos, '@%-.*s' % (maxcolwidth - max_username_len - 4, domain), color_login_attrs)
+                except ValueError:
+                    self.scr.addstr(row, col*maxcolwidth + 3, logstr)
+                login_idx += 1
+                if login_idx == lenldata:
+                    self.disp_instr(height, width)
+                    return 0
+        self.disp_instr(height, width)
+        return login_idx
+
+    def draw_screen(self, ldata, bykey, height, width):
+        selkey = -1
+        login_idx = 0
+        screen_items = 0
+        while True:
+            self.scr.erase()
+            login_idx = self.draw_columns(ldata, self.scr, self.height, self.width, self.maxcolwidth, self.maxcols, login_idx=login_idx)
+            if screen_items == 0:
+                screen_items = login_idx
+            #read_keycode()
+            c = self.scr.getch()
+            # space == 32, pgdn == 338
+            # backspace == 127, pgup == 339
+            # esc == 27
+            if c == 32 or c == 338:
+                continue
+            if c == 127 or c == 339:
+                login_idx = max(0, login_idx - screen_items)
+                continue
+            if c == 27:
+                err_exit('', 0, finish_curses=True)
+            if c < 256:
+                selkey = chr(c)
+            # enter == 10
+            if c == 10:
+                s = sess.session['last_login']
+                self.login = LoginDatum(32, ' ', s['name'], s['login'], s['params'])
+                self.end_curses()
+                self.connect()
+            if selkey in bykey:
+                break
+        return selkey
+
+    def set_screen_data(self):
+        global scr
+        self.scr = curses.initscr()
+        scr = self.scr
+        self.scr.keypad(True)
+        curses.start_color()
+        curses.use_default_colors()
+        keycolor = int(cfg.options.get('key_color', 1))
+        curses.init_pair(1, keycolor, -1)
+        groupcolor = int(cfg.options.get('group_color', 1))
+        curses.init_pair(2, groupcolor, -1)
+        curses.init_pair(3, -1, -1)
+        self.height, self.width = self.scr.getmaxyx()
+        self.maxcolwidth = int(cfg.options['max_column_width'])
+        self.maxcols = self.width / (self.maxcolwidth)
+
+    def end_curses(self):
+        curses.nocbreak()
+        self.scr.keypad(False)
+        curses.echo()
+        curses.endwin()
+
+    def user_select_login(self, logins):
+        self.set_screen_data()
+        ldata, bykey = self.get_login_data(logins, self.maxcolwidth)
+        selkey = self.draw_screen(ldata, bykey, self.height, self.width)
+        self.login = bykey[selkey]
+        self.end_curses()
+
+    def connect(self):
+        ssh = cfg.options['ssh']
+        sys.stdout.flush()
+        args = [ssh]
+        params = cfg.options.get('global_params', ' ')
+        if self.login.params:
+            params = self.login.params + ' ' + params
+        params = [x for x in split_strip(params, ' ') if x]
+        args.extend(params)
+        args.append(self.login.login)
+        print 'CMD:', ' '.join(args)
+        args.insert(1, ssh)
+        sys.stdout.flush()
+        sess.update_kv('last_login', {'name': self.login.name,
+                                      'login': self.login.login,
+                                      'params': self.login.params})
+        os.execl(*args)
+
+
+class MinBotherSession(object):
+
+    def __init__(self):
+        self.path = os.sep.join([os.path.expanduser('~'), '.minbother_session'])
+        self.session = None
+        self._default_session = {'last_login': {'name': None,
+                                                'login': None,
+                                                'params': None}}
+        self.session = self.setdefault()
+
+    def read_session(self):
+        fo = open(self.path, 'rb')
+        self.session = pickle.load(fo)
+        fo.close()
+        return self.session
+
+    def write_session(self, sess=None):
+        fo = open(self.path, 'wb')
+        if not sess:
+            sess = self.session
+        cnt = pickle.dump(sess, fo)
+        fo.close()
+
+    def update_kv(self, k, v):
+        self.session[k] = v
+        self.write_session()
+
+    def setdefault(self):
+        try:
+            self.read_session()
+        except Exception:
+            self.write_session(self._default_session)
+            self.read_session()
+        return self.session
+
+
+if __name__ == '__main__':
+    signal.signal(signal.SIGINT, signal_handler)
+    sess = MinBotherSession()
+    cfg = MiniConfig('logins.conf')
+    logsel = LoginSelector()
+    logsel.connect()
